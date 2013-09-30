@@ -16,8 +16,12 @@
 
 package org.codehaus.groovy.grails.transaction.transform
 
+import static org.codehaus.groovy.grails.compiler.injection.GrailsASTUtils.*
 import grails.transaction.Transactional
 import groovy.transform.CompileStatic
+
+import java.lang.reflect.Modifier
+
 import org.codehaus.groovy.ast.*
 import org.codehaus.groovy.ast.expr.*
 import org.codehaus.groovy.ast.stmt.BlockStatement
@@ -31,6 +35,7 @@ import org.codehaus.groovy.ast.stmt.TryCatchStatement
 import org.codehaus.groovy.control.CompilePhase
 import org.codehaus.groovy.control.SourceUnit
 import org.codehaus.groovy.grails.compiler.injection.GrailsASTUtils
+import org.codehaus.groovy.grails.compiler.injection.GrailsArtefactClassInjector
 import org.codehaus.groovy.grails.orm.support.TransactionManagerAware
 import org.codehaus.groovy.syntax.Token
 import org.codehaus.groovy.syntax.Types
@@ -38,10 +43,10 @@ import org.codehaus.groovy.transform.ASTTransformation
 import org.codehaus.groovy.transform.GroovyASTTransformation
 import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.TransactionStatus
+import org.springframework.transaction.annotation.Isolation
+import org.springframework.transaction.annotation.Propagation
 import org.springframework.transaction.support.TransactionCallback
 import org.springframework.transaction.support.TransactionTemplate
-
-import java.lang.reflect.Modifier
 
 /**
  * This AST transform reads the {@link grails.transaction.Transactional} annotation and transforms method calls by
@@ -77,8 +82,7 @@ class TransactionalTransform implements ASTTransformation{
             final declaringClassNode = methodNode.getDeclaringClass()
 
             weaveTransactionManagerAware(declaringClassNode)
-
-            weaveTransactionalMethod(annotationNode, methodNode)
+            weaveTransactionalMethod(declaringClassNode, annotationNode, methodNode)
         }
         else if (parent instanceof ClassNode) {
             weaveTransactionalBehavior(parent, annotationNode)
@@ -91,13 +95,16 @@ class TransactionalTransform implements ASTTransformation{
 
         ClassNode controllerMethodAnn = getAnnotationClassNode("grails.web.controllers.ControllerMethod")
 
-
-        for (MethodNode md in classNode.methods) {
+        List<MethodNode> deferredMethods = new ArrayList<MethodNode>();
+        
+        List<MethodNode> methods = new ArrayList<MethodNode>(classNode.getMethods());
+        
+        for (MethodNode md in methods) {
             if (Modifier.isPublic(md.modifiers) && !Modifier.isAbstract(md.modifiers)) {
                 if (md.getAnnotations(MY_TYPE)) continue
 
                 if (controllerMethodAnn && md.getAnnotations(controllerMethodAnn)) continue
-                weaveTransactionalMethod(annotationNode, md)
+                weaveTransactionalMethod(classNode, annotationNode, md);
             }
         }
     }
@@ -112,14 +119,26 @@ class TransactionalTransform implements ASTTransformation{
         }
     }
 
-    protected void weaveTransactionalMethod(AnnotationNode annotationNode, MethodNode methodNode) {
-
+    protected void weaveTransactionalMethod(ClassNode classNode, AnnotationNode annotationNode, MethodNode methodNode) {
+        String renamedMethodName = '$tt__' + methodNode.getName()
+        final transactionStatusParameter = new Parameter(ClassHelper.make(TransactionStatus).getPlainNodeReference(), "transactionStatus")
+        def newParameters = copyParameters(((methodNode.getParameters() as List) + [transactionStatusParameter]) as Parameter[]) 
+        
+        MethodNode renamedMethodNode = new MethodNode(
+                renamedMethodName,
+                Modifier.PROTECTED, methodNode.getReturnType(),
+                newParameters,
+                GrailsArtefactClassInjector.EMPTY_CLASS_ARRAY,
+                methodNode.code
+                );
+        classNode.addMethod(renamedMethodNode);
+        
         BlockStatement methodBody = new BlockStatement()
 
         final constructorArgs = new ArgumentListExpression()
-        constructorArgs.addExpression(new VariableExpression(PROPERTY_TRANSACTION_MANAGER));
-        final transactionTemplateVar = new VariableExpression('$transactionTemplate')
+        constructorArgs.addExpression(new VariableExpression(PROPERTY_TRANSACTION_MANAGER, ClassHelper.make(PlatformTransactionManager)));
         final transactionTemplateClassNode = ClassHelper.make(TransactionTemplate).getPlainNodeReference()
+        final transactionTemplateVar = new VariableExpression('$transactionTemplate', transactionTemplateClassNode)
         methodBody.addStatement(
             new ExpressionStatement(
                 new DeclarationExpression(
@@ -135,22 +154,28 @@ class TransactionalTransform implements ASTTransformation{
 
             if (name == 'isolation') {
                 name = 'isolationLevel'
-                expr = new MethodCallExpression(expr, "value", new ArgumentListExpression())
+                expr = applyDefaultMethodTarget(new MethodCallExpression(expr, "value", new ArgumentListExpression()), Isolation.class);
             } else if (name == 'propagation') {
                 name = 'propagationBehavior'
-                expr = new MethodCallExpression(expr, "value", new ArgumentListExpression())
+                expr = applyDefaultMethodTarget(new MethodCallExpression(expr, "value", new ArgumentListExpression()), Propagation.class)
             }
 
             methodBody.addStatement(
                 new ExpressionStatement(
-                    new BinaryExpression(new PropertyExpression(transactionTemplateVar, name),
-                        Token.newSymbol(Types.EQUAL, 0, 0),
-                        expr)
+                    buildSetPropertyExpression(transactionTemplateVar, name, transactionTemplateClassNode, expr)
                 )
             )
         }
-
-        final tryCatchStatement = new TryCatchStatement(methodNode.getCode(), new EmptyStatement())
+        
+        final variableScope = new VariableScope()
+        for (Parameter p in methodNode.parameters) {
+            p.setClosureSharedVariable(true);
+            variableScope.putReferencedLocalVariable(p);
+        }
+        final originalMethodCall = new MethodCallExpression(new VariableExpression("this"), renamedMethodName, new ArgumentListExpression(renamedMethodNode.parameters))
+        originalMethodCall.setImplicitThis(false)
+        originalMethodCall.setMethodTarget(renamedMethodNode)
+        final tryCatchStatement = new TryCatchStatement(new ExpressionStatement(originalMethodCall), new EmptyStatement())
 
         final runtimeExceptionThrowStatement = new ThrowStatement(new VariableExpression('$ex'))
         tryCatchStatement.addCatch(new CatchStatement(new Parameter(new ClassNode(RuntimeException.class), '$ex'), runtimeExceptionThrowStatement))
@@ -161,26 +186,19 @@ class TransactionalTransform implements ASTTransformation{
         final throwableHolderReturnStatement = new ReturnStatement(new ConstructorCallExpression(throwableHolderClassNode, throwableHolderConstructorArgs))
         tryCatchStatement.addCatch(new CatchStatement(new Parameter(new ClassNode(Exception.class), '$ex'), throwableHolderReturnStatement))
 
-        final methodArgs = new ArgumentListExpression()
-        final executeMethodParameterTypes = [new Parameter(ClassHelper.make(TransactionStatus).getPlainNodeReference(), "transactionStatus")] as Parameter[]
+        final executeMethodParameterTypes = [transactionStatusParameter] as Parameter[]
         final callCallExpression = new ClosureExpression(executeMethodParameterTypes, tryCatchStatement)
 
-        final variableScope = new VariableScope()
-        for (Parameter p in methodNode.parameters) {
-            p.setClosureSharedVariable(true);
-            variableScope.putReferencedLocalVariable(p);
-        }
+
         callCallExpression.setVariableScope(variableScope)
         final castExpression = new CastExpression(ClassHelper.make(TransactionCallback).getPlainNodeReference(),
             callCallExpression
         )
         castExpression.coerce = true
-        methodArgs.addExpression(castExpression)
+        final methodArgs = new ArgumentListExpression(castExpression)
 
         final transactionTemplateResultVar = new VariableExpression('$transactionTemplateExecuteResult')
-        final executeMethodCallExpression = new MethodCallExpression(transactionTemplateVar, METHOD_EXECUTE, methodArgs)
-        final executeMethodNode = transactionTemplateClassNode.getMethod("execute", executeMethodParameterTypes)
-        executeMethodCallExpression.setMethodTarget(executeMethodNode)
+        final executeMethodCallExpression = applyDefaultMethodTarget(new MethodCallExpression(transactionTemplateVar, METHOD_EXECUTE, methodArgs), transactionTemplateClassNode)
         methodBody.addStatement(new ExpressionStatement(
             new DeclarationExpression(
                 transactionTemplateResultVar,
@@ -192,10 +210,12 @@ class TransactionalTransform implements ASTTransformation{
         final instanceOfThrowableHolderExpression = new BooleanExpression(new BinaryExpression(
             transactionTemplateResultVar, Token.newSymbol(Types.KEYWORD_INSTANCEOF, 0, 0), new ClassExpression(throwableHolderClassNode)
         ))
-        final throwableHolderThrowStatement = new ThrowStatement(new MethodCallExpression(transactionTemplateResultVar, "getThrowable", GrailsASTUtils.ZERO_ARGUMENTS))
+        final throwableHolderThrowStatement = new ThrowStatement(applyDefaultMethodTarget(new MethodCallExpression(transactionTemplateResultVar, "getThrowable", GrailsASTUtils.ZERO_ARGUMENTS), ThrowableHolder.class));
         methodBody.addStatement(new IfStatement(instanceOfThrowableHolderExpression, throwableHolderThrowStatement, new EmptyStatement()))
-
-        methodBody.addStatement(new ExpressionStatement(transactionTemplateResultVar))
+        
+        if(methodNode.getReturnType() != ClassHelper.VOID_TYPE) {
+            methodBody.addStatement(new ReturnStatement(new CastExpression(methodNode.getReturnType(), transactionTemplateResultVar)))
+        }
         methodNode.setCode(methodBody)
     }
 
