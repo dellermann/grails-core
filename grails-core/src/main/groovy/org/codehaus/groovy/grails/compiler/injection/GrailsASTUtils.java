@@ -1160,4 +1160,15 @@ public class GrailsASTUtils {
         return methodCallExpression;
     }
     
+    public static void markApplied(ClassNode classNode, Class<?> transformationClass) {
+        classNode.setNodeMetaData(appliedTransformationKey(transformationClass), Boolean.TRUE);
+    }
+
+    private static String appliedTransformationKey(Class<?> transformationClass) {
+        return "APPLIED_" + transformationClass.getName();
+    }
+    
+    public static boolean isApplied(ClassNode classNode, Class<?> transformationClass) {
+        return classNode.getNodeMetaData(appliedTransformationKey(transformationClass)) == Boolean.TRUE;
+    }
 }
