@@ -54,25 +54,7 @@ class GrailsTransactionTemplate {
 
     Object execute(Closure action) throws TransactionException {
         try {
-            Object result = transactionTemplate.execute(new TransactionCallback() {
-                Object doInTransaction(TransactionStatus status) {
-                    try {
-                        return action.call(status)
-                    }
-                    catch (Throwable e) {
-                        if (transactionAttribute.rollbackOn(e)) {
-                            if (e instanceof RuntimeException) {
-                                throw e
-                            } else {
-                                throw new ThrowableHolderException(e)
-                            }
-                        } else {
-                            return new ThrowableHolder(e)
-                        }
-                    }
-                }
-            })
-
+            Object result = transactionTemplate.execute(createTransactionCallback(action, transactionAttribute))
             if (result instanceof ThrowableHolder) {
                 throw result.getThrowable()
             } else {
@@ -83,11 +65,44 @@ class GrailsTransactionTemplate {
             throw e.getCause()
         }
     }
+    
+    protected TransactionCallback createTransactionCallback(Closure action, TransactionAttribute transactionAttribute) {
+        new ClosureCallingTransactionCallback(action, transactionAttribute)
+    }
+    
+    @CompileStatic
+    static class ClosureCallingTransactionCallback implements TransactionCallback {
+        private Closure action
+        private TransactionAttribute transactionAttribute
+        
+        ClosureCallingTransactionCallback(Closure action, TransactionAttribute transactionAttribute) {
+            this.action=action
+            this.transactionAttribute=transactionAttribute
+        }
+        
+        Object doInTransaction(TransactionStatus status) {
+            try {
+                return action.call(status)
+            }
+            catch (Throwable e) {
+                if (transactionAttribute.rollbackOn(e)) {
+                    if (e instanceof RuntimeException) {
+                        throw e
+                    } else {
+                        throw new ThrowableHolderException(e)
+                    }
+                } else {
+                    return new ThrowableHolder(e)
+                }
+            }
+        }
+    }
 
     /**
      * Internal holder class for a Throwable, used as a return value
      * from a TransactionCallback (to be subsequently unwrapped again).
      */
+    @CompileStatic
     static class ThrowableHolder {
 
         private final Throwable throwable;
@@ -105,6 +120,7 @@ class GrailsTransactionTemplate {
      * Internal holder class for a Throwable, used as a RuntimeException to be
      * thrown from a TransactionCallback (and subsequently unwrapped again).
      */
+    @CompileStatic
     static class ThrowableHolderException extends RuntimeException {
 
         ThrowableHolderException(Throwable throwable) {
