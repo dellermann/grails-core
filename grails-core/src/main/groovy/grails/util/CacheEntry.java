@@ -88,15 +88,13 @@ public class CacheEntry<V> {
      * @return The atomic reference
      */
     public V getValue(long timeout, Callable<V> updater) {
-        if (initialized && (timeout < 0 || updater==null)) return valueRef.get();
-
         if (!initialized || hasExpired(timeout)) {
             try {
                 long beforeLockingCreatedMillis = createdMillis;
                 writeLock.lock();
                 if (!initialized || shouldUpdate(beforeLockingCreatedMillis)) {
                     try {
-                        valueRef.set(updater.call());
+                        valueRef.set(updateValue(valueRef.get(), updater));
                         initialized=true;
                     }
                     catch (Exception e) {
@@ -114,12 +112,16 @@ public class CacheEntry<V> {
         return valueRef.get();
     }
 
+    protected V updateValue(V oldValue, Callable<V> updater) throws Exception {
+        return updater != null ? updater.call() : oldValue;
+    }
+
     public V getValue() {
         return valueRef.get();
     }
 
     protected boolean hasExpired(long timeout) {
-        return System.currentTimeMillis() - timeout > createdMillis;
+        return timeout >= 0 && System.currentTimeMillis() - timeout > createdMillis;
     }
 
     protected boolean shouldUpdate(long beforeLockingCreatedMillis) {
