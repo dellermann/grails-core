@@ -69,7 +69,10 @@ public class CacheEntry<V> {
         CacheEntry<V> cacheEntry = map.get(key);
         if(cacheEntry==null) {
             cacheEntry = BeanUtils.instantiate(cacheEntryClass);
-            cacheEntry = map.putIfAbsent(key, cacheEntry);
+            CacheEntry<V> previousEntry = map.putIfAbsent(key, cacheEntry);
+            if(previousEntry != null) {
+                cacheEntry = previousEntry;
+            }
         }
         return cacheEntry.getValue(timeoutMillis, updater);
     }
