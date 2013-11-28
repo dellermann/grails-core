@@ -38,6 +38,7 @@ public class CacheEntry<V> {
     protected AtomicReference<V> valueRef=new AtomicReference<V>(null);
     protected long createdMillis;
     protected Lock writeLock=new ReentrantLock();
+    protected volatile boolean initialized=false;
 
     public CacheEntry() {
         expire();
@@ -45,6 +46,7 @@ public class CacheEntry<V> {
     
     public CacheEntry(V value) {
         this.valueRef.set(value);
+        initialized=true;
         resetTimestamp();
     }
     
@@ -86,15 +88,16 @@ public class CacheEntry<V> {
      * @return The atomic reference
      */
     public V getValue(long timeout, Callable<V> updater) {
-        if (timeout < 0 || updater==null) return valueRef.get();
+        if (initialized && (timeout < 0 || updater==null)) return valueRef.get();
 
-        if (hasExpired(timeout)) {
+        if (!initialized || hasExpired(timeout)) {
             try {
                 long beforeLockingCreatedMillis = createdMillis;
                 writeLock.lock();
-                if (shouldUpdate(beforeLockingCreatedMillis)) {
+                if (!initialized || shouldUpdate(beforeLockingCreatedMillis)) {
                     try {
                         valueRef.set(updater.call());
+                        initialized=true;
                     }
                     catch (Exception e) {
                         throw new UpdateException(e);
