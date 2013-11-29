@@ -207,8 +207,8 @@ public class PluginAwareResourceBundleMessageSource extends ReloadableResourceBu
             public PropertiesHolder call() throws Exception {
                 Properties mergedProps = new Properties();
                 PropertiesHolder mergedHolder = new PropertiesHolder(mergedProps);
-                for (int i = pluginBaseNames.size() - 1; i >= 0; i--) {
-                    List<Pair<String, Resource>> filenamesAndResources = calculateAllFilenames(pluginBaseNames.get(i), locale);
+                for (String basename : pluginBaseNames) {
+                    List<Pair<String, Resource>> filenamesAndResources = calculateAllFilenames(basename, locale);
                     for (int j = filenamesAndResources.size() - 1; j >= 0; j--) {
                         Pair<String, Resource> filenameAndResource = filenamesAndResources.get(j);
                         if(filenameAndResource.getbValue() != null) {
